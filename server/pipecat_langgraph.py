@@ -1,53 +1,20 @@
 import json
 import uuid
-from dataclasses import dataclass
-from typing import Any, Union
 
-from langchain.schema import Document
-from langchain_core.messages import HumanMessage
 from loguru import logger
 from pipecat.frames.frames import (
-    ControlFrame,
-    DataFrame,
     Frame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
-    LLMMessagesFrame,
     LLMTextFrame,
 )
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContextFrame
-from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
-from pipecat.services.llm_service import FunctionCallFromLLM, LLMService
-
-from agent_response import process_stream
-
-try:
-    from langchain_core.messages import AIMessageChunk
-except ModuleNotFoundError as e:
-    logger.exception(
-        "In order to use Langgraph, you need to `pip install pipecat-ai[langchain]`. "
-    )
-    raise Exception(f"Missing module: {e}")
+from pipecat.processors.frame_processor import FrameDirection
+from pipecat.services.llm_service import LLMService
 
 thread_id = str(uuid.uuid4())
 user_id = str(uuid.uuid4())
 
-
-@dataclass
-class ToolResultMessage(DataFrame):
-    result: Any
-    type: str = "tool_result"
-
-    def __str__(self):
-        return f"{self.name}(result: {self.result})"
-
-@dataclass
-class LLMResponseEndFrame(ControlFrame):
-    pass
-
-@dataclass
-class LLMResponseStartFrame(ControlFrame):
-    pass
 
 
 class LanggraphProcessor(LLMService):
@@ -76,6 +43,12 @@ class LanggraphProcessor(LLMService):
         try:
             
             import aiohttp
+            from pipecat.frames.frames import (
+                FunctionCallFromLLM,
+                FunctionCallInProgressFrame,
+                FunctionCallResultFrame,
+                FunctionCallsStartedFrame,
+            )
             
             request_body = {
                 "message": text,
@@ -90,38 +63,94 @@ class LanggraphProcessor(LLMService):
             
             async with aiohttp.ClientSession() as session:
                 async with session.post(
-                    "https://api.dev.boris.brainanalytics.co/stream?agent_id=uncle-boris-agent",
+                    "http://localhost:7999/stream?agent_id=uncle-boris-agent",
                     json=request_body
                 ) as response:
-                    all_responses = []
-                    print(response)
+                    active_tool_calls = {}
+                    tool_input_buffer = {}
+                    
                     async for line in response.content:
                         if line:
                             try:
-                                # Parse each line as JSON (assuming server-sent events or newline-delimited JSON)
-                                print(line)
                                 line_text = line.decode('utf-8').strip()
-                                print(line_text)
-                                if line_text:
+                                if line_text.startswith("data: "):
                                     line_text = line_text[6:]
-                                    print(line_text)
-                                    response_data = json.loads(line_text)["content"]
-                                    response_type = response_data.get("type", None)
-                                    response = response_data.get("content", "")
-                                    if response_type and response:
-                                        print("Deepak1")
-                                        await self.push_frame(LLMTextFrame(response))
+                                    
+                                if line_text == "[DONE]":
+                                    break
+                                    
+                                if line_text:
+                                    response_data = json.loads(line_text)
+                                    response_type = response_data.get("type")
+                                    print(response_data)
+                                    if response_type == "reasoning-start":
+                                        # Reasoning started - could emit a frame here if needed
+                                        logger.debug("Reasoning started")
+                                    
+                                    elif response_type == "reasoning-end":
+                                        # Reasoning ended
+                                        logger.debug("Reasoning ended")
+                                    
+                                    elif response_type == "tool-input-start":
+                                        tool_call_id = response_data.get("toolCallId")
+                                        tool_name = response_data.get("toolName")
+                                        if tool_call_id and tool_name:
+                                            tool_input_buffer[tool_call_id] = ""
+                                            function_call = FunctionCallFromLLM(
+                                                function_name=tool_name,
+                                                tool_call_id=tool_call_id,
+                                                arguments={},
+                                                context=None
+                                            )
+                                            active_tool_calls[tool_call_id] = function_call
+                                            await self.push_frame(FunctionCallsStartedFrame([function_call]))
+                                            await self.push_frame(FunctionCallInProgressFrame(
+                                                function_name=tool_name,
+                                                tool_call_id=tool_call_id,
+                                                arguments={}
+                                            ))
+                                    
+                                    elif response_type == "tool-input-delta":
+                                        tool_text = response_data.get("text", "")
+                                        tool_id = response_data.get("id")
+                                        # Find the tool call by id or use the most recent one
+                                        for tool_call_id, buffer in tool_input_buffer.items():
+                                            tool_input_buffer[tool_call_id] += tool_text
+                                            break
+                                    
+                                    elif response_type == "tool-input-end":
+                                        # Tool input complete, update arguments
+                                        for tool_call_id, input_text in tool_input_buffer.items():
+                                            if tool_call_id in active_tool_calls:
+                                                active_tool_calls[tool_call_id].arguments = {"query": input_text}
+                                                # Emit function call result frame
+                                                await self.push_frame(FunctionCallResultFrame(
+                                                    function_name=active_tool_calls[tool_call_id].function_name,
+                                                    tool_call_id=tool_call_id,
+                                                    result=f"Tool call executed: {input_text}"
+                                                ))
+                                        tool_input_buffer.clear()
+                                    
+                                    elif response_type == "text-start":
+                                        # Text response starting
+                                        logger.debug("Text response started")
+                                    
+                                    elif response_type == "text-delta":
+                                        response_text = response_data.get("text", "")
+                                        if response_text:
+                                            await self.push_frame(LLMTextFrame(response_text))
+                                    
+                                    elif response_type == "source-url":
+                                        # Source URL information - could be handled if needed
+                                        logger.debug(f"Source URL: {response_data.get('url')}")
+                                        
                             except json.JSONDecodeError as e:
                                 # Handle non-JSON lines or partial data
                                 continue
-            print("Deepak2")
-            response = " ".join(all_responses)
+                                
         except GeneratorExit:
             logger.exception(f"{self} generator was closed prematurely")
         except Exception as e:
             logger.exception(f"{self} an unknown error occurred: {e}")
         
-        print("Deepak3")
-        
-
         await self.push_frame(LLMFullResponseEndFrame())

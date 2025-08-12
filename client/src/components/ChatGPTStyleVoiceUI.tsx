@@ -24,7 +24,7 @@ import { SmallWebRTCTransport } from "@pipecat-ai/small-webrtc-transport";
 import { motion, AnimatePresence } from "framer-motion";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { Mic, PhoneOff, Settings, Loader2, Volume2 } from "lucide-react";
+import { Mic, PhoneOff, Settings, Loader2, Volume2, Wrench } from "lucide-react";
 
 /**
  * 🧠 How to use
@@ -41,6 +41,7 @@ import { Mic, PhoneOff, Settings, Loader2, Volume2 } from "lucide-react";
  *   • Big pulsing round mic button (press-and-hold or tap-to-toggle)
  *   • Waveform when you speak; glow when the bot speaks
  *   • Streaming transcripts for you and the assistant
+ *   • Function call events displayed before responses
  *   • Device selector + connection state + quick settings
  */
 
@@ -162,9 +163,11 @@ function QuickSettings() {
 // --- Message Pane ---------------------------------------------------------------------------
 interface ChatMsg {
   id: string;
-  role: "user" | "assistant" | "system";
+  role: "user" | "assistant" | "system" | "function";
   text: string;
   ephemeral?: boolean;
+  functionName?: string;
+  functionArgs?: any;
 }
 
 function MessagePane() {
@@ -182,6 +185,7 @@ function MessagePane() {
   useRTVIClientEvent(
     RTVIEvent.UserTranscript,
     useCallback((data: { text: string; final?: boolean }) => {
+      console.log("UserTranscript Event", data);
       setMsgs((prev) => {
         const withoutEphemeral = prev.filter((m) => !(m.role === "user" && m.ephemeral));
         if (data.final) {
@@ -204,10 +208,71 @@ function MessagePane() {
     }, [])
   );
 
+  // Function call event (before the response)
+  useRTVIClientEvent(
+    RTVIEvent.LLMFunctionCall,
+    useCallback((data: { function_name: string; args?: any }) => {
+      console.log("LLMFunctionCall Event1", data);
+      setMsgs((prev) => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          role: "function",
+          text: `Calling function: ${data.function_name}`,
+          functionName: data.function_name,
+          functionArgs: data.args,
+        },
+      ]);
+    }, [])
+  );
+
+  // Alternative function call event patterns (in case the server sends different events)
+  useRTVIClientEvent(
+    RTVIEvent.LLMFunctionCall,
+    useCallback((data: { name?: string; function_name?: string; args?: any; arguments?: any }) => {
+      console.log("LLMFunctionCall Event2", data);
+      const functionName = data.name || data.function_name;
+      const functionArgs = data.args || data.arguments;
+      
+      if (functionName) {
+        setMsgs((prev) => [
+          ...prev,
+          {
+            id: crypto.randomUUID(),
+            role: "function",
+            text: `Calling function: ${functionName}`,
+            functionName,
+            functionArgs,
+          },
+        ]);
+      }
+    }, [])
+  );
+
+  // Generic function-related events
+  useRTVIClientEvent(
+    RTVIEvent.LLMFunctionCall,
+    useCallback((data: any) => {
+      console.log("LLMFunctionCall Event3", data);
+      const functionName = data?.function_name || data?.name || data?.function || "unknown";
+      setMsgs((prev) => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          role: "function",
+          text: `Calling function: ${functionName}`,
+          functionName,
+          functionArgs: data?.args || data?.arguments,
+        },
+      ]);
+    }, [])
+  );
+
   // Bot streaming tokens
   useRTVIClientEvent(
     RTVIEvent.BotLlmText,
     useCallback((data: { text: string }) => {
+      console.log("BotLlmText Event", data);
       setBotStream((s) => s + data.text);
     }, [])
   );
@@ -216,6 +281,7 @@ function MessagePane() {
   useRTVIClientEvent(
     RTVIEvent.BotTranscript,
     useCallback((data: { text: string }) => {
+      console.log("BotTranscript Event", data);
       setMsgs((prev) => [
         ...prev.filter((m) => !(m.role === "assistant" && m.ephemeral)),
         { id: crypto.randomUUID(), role: "assistant", text: data.text },
@@ -228,6 +294,7 @@ function MessagePane() {
   useRTVIClientEvent(
     RTVIEvent.Error,
     useCallback((msg: any) => {
+      console.log("Error Event", msg);
       setMsgs((prev) => [
         ...prev,
         {
@@ -243,7 +310,7 @@ function MessagePane() {
     <div className="w-full overflow-y-auto pt-6">
       <div className="mx-auto max-w-3xl space-y-3">
         {msgs.map((m) => (
-          <Bubble key={m.id} role={m.role} text={m.text} ephemeral={m.ephemeral} />
+          <Bubble key={m.id} role={m.role} text={m.text} ephemeral={m.ephemeral} functionName={m.functionName} functionArgs={m.functionArgs} />
         ))}
         {botStream && (
           <Bubble role="assistant" text={botStream} ephemeral />
@@ -254,13 +321,21 @@ function MessagePane() {
   );
 }
 
-function Bubble({ role, text, ephemeral }: { role: ChatMsg["role"]; text: string; ephemeral?: boolean }) {
+function Bubble({ role, text, ephemeral, functionName, functionArgs }: { 
+  role: ChatMsg["role"]; 
+  text: string; 
+  ephemeral?: boolean;
+  functionName?: string;
+  functionArgs?: any;
+}) {
   const isUser = role === "user";
   const isAssistant = role === "assistant";
+  const isFunction = role === "function";
   const base = "rounded-2xl px-4 py-3 text-[15px] leading-relaxed shadow-sm";
   const you = "bg-emerald-500/10 text-emerald-100 ring-1 ring-emerald-500/30";
   const bot = "bg-neutral-800 text-neutral-100 ring-1 ring-white/10";
   const sys = "bg-amber-700/20 text-amber-100 ring-1 ring-amber-500/30";
+  const func = "bg-blue-700/20 text-blue-100 ring-1 ring-blue-500/30";
 
   return (
     <motion.div
@@ -269,8 +344,19 @@ function Bubble({ role, text, ephemeral }: { role: ChatMsg["role"]; text: string
       exit={{ opacity: 0, y: -8 }}
       className={`w-fit max-w-[85%] ${isUser ? "ml-auto" : "mr-auto"}`}
     >
-      <div className={`${base} ${isUser ? you : isAssistant ? bot : sys} ${ephemeral ? "opacity-70 italic" : ""}`}>
+      <div className={`${base} ${isUser ? you : isAssistant ? bot : isFunction ? func : sys} ${ephemeral ? "opacity-70 italic" : ""}`}>
+        {isFunction && (
+          <div className="flex items-center gap-2 mb-2">
+            <Wrench className="size-4" />
+            <span className="font-medium">Function Call</span>
+          </div>
+        )}
         {text}
+        {isFunction && functionArgs && (
+          <div className="mt-2 text-xs opacity-70">
+            <pre className="whitespace-pre-wrap">{JSON.stringify(functionArgs, null, 2)}</pre>
+          </div>
+        )}
       </div>
     </motion.div>
   );
@@ -347,17 +433,26 @@ function MicDock() {
   // Listen for bot speaking state to animate the ring
   useRTVIClientEvent(
     RTVIEvent.BotStartedSpeaking,
-    useCallback(() => setBotTalking(true), [])
+    useCallback(() => {
+      console.log("BotStartedSpeaking Event");
+      setBotTalking(true);
+    }, [])
   );
   useRTVIClientEvent(
     RTVIEvent.BotStoppedSpeaking,
-    useCallback(() => setBotTalking(false), [])
+    useCallback(() => {
+      console.log("BotStoppedSpeaking Event");
+      setBotTalking(false);
+    }, [])
   );
-
+        
   // Also clear spinner on explicit errors
   useRTVIClientEvent(
     RTVIEvent.Error,
-    useCallback(() => setConnecting(false), [])
+    useCallback(() => {
+      console.log("Error Event");
+      setConnecting(false);
+    }, [])
   );
 
   const pressedRef = useRef(false);

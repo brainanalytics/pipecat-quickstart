@@ -1,0 +1,47 @@
+services:
+  # Pipecat AI Server
+  server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: pipecat-server
+    ports:
+      - "7860:7860"
+    environment:
+      - HOST=0.0.0.0
+      - PORT=7860
+    env_file:
+      - ./server/.env
+    volumes:
+      - ./server:/app
+    restart: unless-stopped
+    networks:
+      - pipecat-network
+
+  # Next.js Client
+  client:
+    build:
+      context: ./client
+      dockerfile: Dockerfile
+    container_name: pipecat-client
+    ports:
+      - "3000:3000"
+    env_file:
+      - ./client/.env.local
+    volumes:
+      - ./client:/app
+      - /app/node_modules
+      - /app/.next
+    restart: unless-stopped
+    networks:
+      - pipecat-network
+    depends_on:
+      - server
+
+networks:
+  pipecat-network:
+    driver: bridge
+
+volumes:
+  node_modules:
+  next_build:
