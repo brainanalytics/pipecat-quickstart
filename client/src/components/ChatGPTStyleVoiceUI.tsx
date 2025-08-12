@@ -1,4 +1,6 @@
 "use client";
+
+
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   PipecatClient,
@@ -24,8 +26,6 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Mic, PhoneOff, Settings, Loader2, Volume2 } from "lucide-react";
 
-import { POST } from "@/app/api/offer/route";
-
 /**
  * 🧠 How to use
  * - Install deps: 
@@ -46,24 +46,43 @@ import { POST } from "@/app/api/offer/route";
 
 // --- Helper: create a single Pipecat client instance -----------------------------------------
 function createClient() {
+  // Avoid constructing WebRTC transport during SSR
+  if (typeof window === "undefined") return null as any;
+
   const transportName =
-    (typeof window !== "undefined" &&
-      (window as any).__PIPECAT_TRANSPORT__) ||
+    (window as any).__PIPECAT_TRANSPORT__ ||
     process.env.NEXT_PUBLIC_PIPECAT_TRANSPORT ||
     "small-webrtc";
 
-  const transport = new SmallWebRTCTransport()
+  const transport =
+    transportName === "daily"
+      ? // new DailyTransport() // if you switch transports
+        // @ts-ignore
+        new SmallWebRTCTransport()
+      : new SmallWebRTCTransport();
 
   return new PipecatClient({
     transport,
     enableCam: false,
-    enableMic: true, // mic is controlled by our UI
+    enableMic: true,
   });
 }
 
 // --- Root export -----------------------------------------------------------------------------
 export default function ChatGPTStyleVoiceUI() {
-  const client = useMemo(() => createClient(), []);
+  const [client, setClient] = useState<PipecatClient | null>(null);
+
+  // Instantiate the client only on the browser after mount
+  useEffect(() => {
+    const c = createClient();
+    if (c) setClient(c);
+    return () => {
+      try { c?.disconnect?.(); } catch {}
+    };
+  }, []);
+
+  if (!client) return null; // or a small loader
+
   return (
     <PipecatClientProvider client={client}>
       <PipecatClientAudio />
@@ -88,14 +107,17 @@ function AppShell() {
 // --- Top Bar ---------------------------------------------------------------------------------
 function TopBar() {
   const state = usePipecatClientTransportState();
-  const niceState = state?.toString?.().replace(/_/g, " ") ?? "DISCONNECTED";
+  const isConnectedState = state === TransportStateEnum.READY || state === TransportStateEnum.CONNECTED;
+  const isDisconnectedState = state === TransportStateEnum.DISCONNECTED || state === undefined || (state as any) === null;
+  const isTransientState = !isConnectedState && !isDisconnectedState;
+  const niceState = (state?.toString?.() || "DISCONNECTED").replace(/_/g, " ");
   return (
     <div className="sticky top-0 z-10 backdrop-blur supports-[backdrop-filter]:bg-neutral-950/40 bg-neutral-950/80 border-b border-white/5">
       <div className="mx-auto max-w-5xl px-4 py-3 flex items-center justify-between gap-3">
         <div className="flex items-center gap-3">
-          <div className="size-2 rounded-full bg-emerald-500 animate-pulse" hidden={state !== "connected"} />
-          <div className="size-2 rounded-full bg-amber-500 animate-pulse" hidden={state === "connected" || state === "disconnected"} />
-          <div className="size-2 rounded-full bg-rose-500 animate-pulse" hidden={state !== "disconnected"} />
+          <div className="size-2 rounded-full bg-emerald-500 animate-pulse" hidden={!isConnectedState} />
+          <div className="size-2 rounded-full bg-amber-500 animate-pulse" hidden={!isTransientState} />
+          <div className="size-2 rounded-full bg-rose-500 animate-pulse" hidden={!isDisconnectedState} />
           <span className="text-sm text-neutral-300">{niceState}</span>
         </div>
         <div className="flex items-center gap-2">
@@ -263,6 +285,9 @@ function MicDock() {
   const [botTalking, setBotTalking] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [connectedOnce, setConnectedOnce] = useState(false);
+  // Modes: push-to-talk vs hands-free (VAD)
+  const [mode, setMode] = useState<'push' | 'handsfree'>(() => (typeof window !== 'undefined' && (localStorage.getItem('voice-mode') as any)) || 'push');
+  const [autoDuck, setAutoDuck] = useState<boolean>(() => (typeof window !== 'undefined' ? localStorage.getItem('voice-autoduck') === '1' : false));
 
   const isConnectedState = state === TransportStateEnum.READY || state === TransportStateEnum.CONNECTED;
 
@@ -295,6 +320,30 @@ function MicDock() {
     }
   }, [state]);
 
+  // Persist mode settings
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try { localStorage.setItem('voice-mode', mode); } catch {}
+  }, [mode]);
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try { localStorage.setItem('voice-autoduck', autoDuck ? '1' : '0'); } catch {}
+  }, [autoDuck]);
+
+  // Hands-free: keep mic open when connected
+  useEffect(() => {
+    if (mode === 'handsfree' && isConnectedState) {
+      enableMic(true);
+    }
+  }, [mode, isConnectedState, enableMic]);
+
+  // Optional: Auto-duck mic when bot speaks (off by default)
+  useEffect(() => {
+    if (mode !== 'handsfree' || !isConnectedState) return;
+    if (!autoDuck) return;
+    enableMic(!botTalking);
+  }, [botTalking, autoDuck, mode, isConnectedState, enableMic]);
+
   // Listen for bot speaking state to animate the ring
   useRTVIClientEvent(
     RTVIEvent.BotStartedSpeaking,
@@ -319,33 +368,57 @@ function MicDock() {
       await startOrConnect();
       return;
     }
+    if (mode === 'handsfree') return; // no press-to-talk in handsfree
     pressedRef.current = true;
     enableMic(true);
-  }, [pcClient, isConnectedState, startOrConnect, enableMic]);
+  }, [pcClient, isConnectedState, startOrConnect, enableMic, mode]);
 
   const onRelease = useCallback(() => {
+    if (mode === 'handsfree') return; // no release effect in handsfree
     pressedRef.current = false;
     setTimeout(() => {
       if (!pressedRef.current) enableMic(false);
     }, 120);
-  }, [enableMic]);
+  }, [enableMic, mode]);
 
   const isConnected = isConnectedState;
-  const label = !isConnected
-    ? connecting
-      ? "Connecting…"
-      : connectedOnce
-      ? "Reconnect"
-      : "Start"
-    : isMicEnabled
-    ? "Listening"
-    : "Hold to talk";
+  const label = mode === 'handsfree'
+    ? (isConnected ? (isMicEnabled ? 'Hands‑free listening' : 'Muted') : connecting ? 'Connecting…' : connectedOnce ? 'Reconnect' : 'Start')
+    : (!isConnected
+        ? (connecting ? 'Connecting…' : connectedOnce ? 'Reconnect' : 'Start')
+        : isMicEnabled
+        ? 'Listening'
+        : 'Hold to talk');
 
   return (
     <div className="sticky bottom-0 left-0 right-0 mx-auto max-w-3xl">
       <div className="pointer-events-none absolute inset-x-0 bottom-0 h-40 bg-gradient-to-t from-neutral-900 to-transparent" />
 
-      <div className="relative flex items-center justify-center py-6">
+      <div className="flex justify-center mb-2">
+        {/* Mode toggle */}
+        <div className="pointer-events-auto inline-flex items-center gap-3">
+          <div className="rounded-full bg-neutral-800/70 ring-1 ring-white/10 p-1">
+            <button
+              className={`px-3 py-1 text-sm rounded-full ${mode === 'push' ? 'bg-neutral-700 text-white' : 'text-neutral-300 hover:bg-neutral-700/40'}`}
+              onClick={() => setMode('push')}
+            >
+              Push
+            </button>
+            <button
+              className={`px-3 py-1 text-sm rounded-full ${mode === 'handsfree' ? 'bg-neutral-700 text-white' : 'text-neutral-300 hover:bg-neutral-700/40'}`}
+              onClick={() => setMode('handsfree')}
+            >
+              Hands‑free
+            </button>
+          </div>
+          <label className="text-sm text-neutral-300 inline-flex items-center gap-2 select-none">
+            <input type="checkbox" checked={autoDuck} onChange={(e) => setAutoDuck(e.target.checked)} />
+            Auto‑mute on bot
+          </label>
+        </div>
+      </div>
+
+      <div className="relative flex items-center justify-center py-4">
         {/* Pulsing aura */}
         <AnimatePresence>
           {(botTalking || isMicEnabled) && (
@@ -399,7 +472,13 @@ function MicDock() {
                     await startOrConnect();
                     return;
                   }
-                  enableMic(!isMicEnabled);
+                  if (mode === 'handsfree') {
+                    // Hands-free: tap toggles mute
+                    enableMic(!isMicEnabled);
+                  } else {
+                    // Push mode: tap toggles mic like a push-to-talk latch
+                    enableMic(!isMicEnabled);
+                  }
                 }}
                 whileTap={{ scale: 0.97 }}
               >
