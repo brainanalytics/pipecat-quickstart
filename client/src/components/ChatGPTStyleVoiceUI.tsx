@@ -1,7 +1,12 @@
 "use client";
 
-
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   PipecatClient,
   RTVIEvent,
@@ -24,11 +29,19 @@ import { SmallWebRTCTransport } from "@pipecat-ai/small-webrtc-transport";
 import { motion, AnimatePresence } from "framer-motion";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { Mic, PhoneOff, Settings, Loader2, Volume2, Wrench } from "lucide-react";
+import {
+  Mic,
+  PhoneOff,
+  Settings,
+  Loader2,
+  Volume2,
+  Wrench,
+  Plus,
+} from "lucide-react";
 
 /**
  * 🧠 How to use
- * - Install deps: 
+ * - Install deps:
  *   npm i @pipecat-ai/client-js @pipecat-ai/client-react @pipecat-ai/small-webrtc-transport framer-motion lucide-react
  *   # If you want shadcn/ui, install it in your project (this file assumes shadcn is configured)
  *
@@ -58,7 +71,6 @@ function createClient() {
   const transport =
     transportName === "daily"
       ? // new DailyTransport() // if you switch transports
-        // @ts-ignore
         new SmallWebRTCTransport()
       : new SmallWebRTCTransport();
 
@@ -67,6 +79,42 @@ function createClient() {
     enableCam: false,
     enableMic: true,
   });
+}
+
+// --- Custom hook for managing thread and user IDs --------------------------------------------
+function useThreadAndUserId() {
+  const [threadId, setThreadId] = useState<string>(() => {
+    if (typeof window === "undefined") return crypto.randomUUID();
+    const stored = localStorage.getItem("voice-thread-id");
+    if (stored) return stored;
+    const newId = crypto.randomUUID();
+    localStorage.setItem("voice-thread-id", newId);
+    return newId;
+  });
+
+  const [userId, setUserId] = useState<string>(() => {
+    if (typeof window === "undefined") return crypto.randomUUID();
+    const stored = localStorage.getItem("voice-user-id");
+    if (stored) return stored;
+    const newId = crypto.randomUUID();
+    localStorage.setItem("voice-user-id", newId);
+    return newId;
+  });
+
+  const startNewConversation = useCallback(() => {
+    const newThreadId = crypto.randomUUID();
+    const newUserId = crypto.randomUUID();
+
+    localStorage.setItem("voice-thread-id", newThreadId);
+    localStorage.setItem("voice-user-id", newUserId);
+
+    setThreadId(newThreadId);
+    setUserId(newUserId);
+
+    return { newThreadId, newUserId };
+  }, []);
+
+  return { threadId, userId, startNewConversation };
 }
 
 // --- Root export -----------------------------------------------------------------------------
@@ -78,7 +126,9 @@ export default function ChatGPTStyleVoiceUI() {
     const c = createClient();
     if (c) setClient(c);
     return () => {
-      try { c?.disconnect?.(); } catch {}
+      try {
+        c?.disconnect?.();
+      } catch {}
     };
   }, []);
 
@@ -94,11 +144,25 @@ export default function ChatGPTStyleVoiceUI() {
 
 // --- Main App Shell --------------------------------------------------------------------------
 function AppShell() {
+  const { startNewConversation } = useThreadAndUserId();
+  const pcClient = usePipecatClient();
+
+  const handleNewConversation = () => {
+    startNewConversation();
+
+    // Disconnect current connection to ensure new thread ID is used
+    if (pcClient) {
+      pcClient.disconnect();
+    }
+
+    // The MessagePane will handle clearing messages
+  };
+
   return (
     <div className="min-h-screen w-full bg-gradient-to-b from-neutral-950 via-neutral-950 to-neutral-900 text-neutral-50 flex flex-col">
-      <TopBar />
+      <TopBar onNewConversation={handleNewConversation} />
       <div className="flex-1 grid grid-rows-[1fr_auto] max-w-3xl w-full mx-auto px-4 gap-4 pb-28 md:pb-32">
-        <MessagePane />
+        <MessagePane onNewConversation={handleNewConversation} />
         <MicDock />
       </div>
     </div>
@@ -106,20 +170,72 @@ function AppShell() {
 }
 
 // --- Top Bar ---------------------------------------------------------------------------------
-function TopBar() {
+function TopBar({ onNewConversation }: { onNewConversation: () => void }) {
   const state = usePipecatClientTransportState();
-  const isConnectedState = state === TransportStateEnum.READY || state === TransportStateEnum.CONNECTED;
-  const isDisconnectedState = state === TransportStateEnum.DISCONNECTED || state === undefined || (state as any) === null;
+  const isConnectedState =
+    state === TransportStateEnum.READY ||
+    state === TransportStateEnum.CONNECTED;
+  const isDisconnectedState =
+    state === TransportStateEnum.DISCONNECTED ||
+    state === undefined ||
+    (state as any) === null;
   const isTransientState = !isConnectedState && !isDisconnectedState;
   const niceState = (state?.toString?.() || "DISCONNECTED").replace(/_/g, " ");
+
+  // Use the custom hook for managing thread and user IDs
+  const { threadId } = useThreadAndUserId();
+  const [showNewThreadIndicator, setShowNewThreadIndicator] = useState(false);
+
+  const handleNewConversation = () => {
+    onNewConversation();
+    // Show brief indicator that new thread was created
+    setShowNewThreadIndicator(true);
+    setTimeout(() => setShowNewThreadIndicator(false), 2000);
+  };
+
   return (
     <div className="sticky top-0 z-10 backdrop-blur supports-[backdrop-filter]:bg-neutral-950/40 bg-neutral-950/80 border-b border-white/5">
       <div className="mx-auto max-w-5xl px-4 py-3 flex items-center justify-between gap-3">
         <div className="flex items-center gap-3">
-          <div className="size-2 rounded-full bg-emerald-500 animate-pulse" hidden={!isConnectedState} />
-          <div className="size-2 rounded-full bg-amber-500 animate-pulse" hidden={!isTransientState} />
-          <div className="size-2 rounded-full bg-rose-500 animate-pulse" hidden={!isDisconnectedState} />
+          <div
+            className="size-2 rounded-full bg-emerald-500 animate-pulse"
+            hidden={!isConnectedState}
+          />
+          <div
+            className="size-2 rounded-full bg-amber-500 animate-pulse"
+            hidden={!isTransientState}
+          />
+          <div
+            className="size-2 rounded-full bg-rose-500 animate-pulse"
+            hidden={!isDisconnectedState}
+          />
           <span className="text-sm text-neutral-300">{niceState}</span>
+          {threadId && (
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-neutral-400 font-mono">
+                Thread: {threadId.slice(0, 8)}... (Frontend)
+              </span>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-6 w-6 p-0 text-neutral-400 hover:text-white hover:bg-neutral-800"
+                onClick={handleNewConversation}
+                title="Start new conversation (clears messages and generates new frontend thread ID)"
+              >
+                <Plus className="size-3" />
+              </Button>
+              {showNewThreadIndicator && (
+                <motion.span
+                  initial={{ opacity: 0, scale: 0.8 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={{ opacity: 0, scale: 0.8 }}
+                  className="text-xs text-emerald-400 font-medium"
+                >
+                  New frontend thread created!
+                </motion.span>
+              )}
+            </div>
+          )}
         </div>
         <div className="flex items-center gap-2">
           <DeviceSelector />
@@ -132,7 +248,8 @@ function TopBar() {
 
 // --- Device Selector -------------------------------------------------------------------------
 function DeviceSelector() {
-  const { availableMics, selectedMic, updateMic } = usePipecatClientMediaDevices();
+  const { availableMics, selectedMic, updateMic } =
+    usePipecatClientMediaDevices();
   return (
     <div className="inline-flex items-center gap-2">
       <Volume2 className="size-4 text-neutral-400" />
@@ -154,7 +271,11 @@ function DeviceSelector() {
 // --- Quick Settings (placeholder) ------------------------------------------------------------
 function QuickSettings() {
   return (
-    <Button variant="ghost" className="text-neutral-300 hover:text-white" size="icon">
+    <Button
+      variant="ghost"
+      className="text-neutral-300 hover:text-white"
+      size="icon"
+    >
       <Settings className="size-5" />
     </Button>
   );
@@ -170,11 +291,22 @@ interface ChatMsg {
   functionArgs?: any;
 }
 
-function MessagePane() {
+function MessagePane({ onNewConversation }: { onNewConversation: () => void }) {
   const pcClient = usePipecatClient();
   const [msgs, setMsgs] = useState<ChatMsg[]>([]);
   const [botStream, setBotStream] = useState("");
   const bottomRef = useRef<HTMLDivElement | null>(null);
+
+  // Clear messages when starting a new conversation
+  const clearMessages = useCallback(() => {
+    setMsgs([]);
+    setBotStream("");
+  }, []);
+
+  // Listen for new conversation requests
+  useEffect(() => {
+    clearMessages();
+  }, [onNewConversation, clearMessages]);
 
   // Scroll to bottom as messages arrive
   useEffect(() => {
@@ -187,7 +319,9 @@ function MessagePane() {
     useCallback((data: { text: string; final?: boolean }) => {
       console.log("UserTranscript Event", data);
       setMsgs((prev) => {
-        const withoutEphemeral = prev.filter((m) => !(m.role === "user" && m.ephemeral));
+        const withoutEphemeral = prev.filter(
+          (m) => !(m.role === "user" && m.ephemeral)
+        );
         if (data.final) {
           return [
             ...withoutEphemeral,
@@ -229,24 +363,32 @@ function MessagePane() {
   // Alternative function call event patterns (in case the server sends different events)
   useRTVIClientEvent(
     RTVIEvent.LLMFunctionCall,
-    useCallback((data: { name?: string; function_name?: string; args?: any; arguments?: any }) => {
-      console.log("LLMFunctionCall Event2", data);
-      const functionName = data.name || data.function_name;
-      const functionArgs = data.args || data.arguments;
-      
-      if (functionName) {
-        setMsgs((prev) => [
-          ...prev,
-          {
-            id: crypto.randomUUID(),
-            role: "function",
-            text: `Calling function: ${functionName}`,
-            functionName,
-            functionArgs,
-          },
-        ]);
-      }
-    }, [])
+    useCallback(
+      (data: {
+        name?: string;
+        function_name?: string;
+        args?: any;
+        arguments?: any;
+      }) => {
+        console.log("LLMFunctionCall Event2", data);
+        const functionName = data.name || data.function_name;
+        const functionArgs = data.args || data.arguments;
+
+        if (functionName) {
+          setMsgs((prev) => [
+            ...prev,
+            {
+              id: crypto.randomUUID(),
+              role: "function",
+              text: `Calling function: ${functionName}`,
+              functionName,
+              functionArgs,
+            },
+          ]);
+        }
+      },
+      []
+    )
   );
 
   // Generic function-related events
@@ -254,7 +396,8 @@ function MessagePane() {
     RTVIEvent.LLMFunctionCall,
     useCallback((data: any) => {
       console.log("LLMFunctionCall Event3", data);
-      const functionName = data?.function_name || data?.name || data?.function || "unknown";
+      const functionName =
+        data?.function_name || data?.name || data?.function || "unknown";
       setMsgs((prev) => [
         ...prev,
         {
@@ -310,20 +453,31 @@ function MessagePane() {
     <div className="w-full overflow-y-auto pt-6">
       <div className="mx-auto max-w-3xl space-y-3">
         {msgs.map((m) => (
-          <Bubble key={m.id} role={m.role} text={m.text} ephemeral={m.ephemeral} functionName={m.functionName} functionArgs={m.functionArgs} />
+          <Bubble
+            key={m.id}
+            role={m.role}
+            text={m.text}
+            ephemeral={m.ephemeral}
+            functionName={m.functionName}
+            functionArgs={m.functionArgs}
+          />
         ))}
-        {botStream && (
-          <Bubble role="assistant" text={botStream} ephemeral />
-        )}
+        {botStream && <Bubble role="assistant" text={botStream} ephemeral />}
         <div ref={bottomRef} />
       </div>
     </div>
   );
 }
 
-function Bubble({ role, text, ephemeral, functionName, functionArgs }: { 
-  role: ChatMsg["role"]; 
-  text: string; 
+function Bubble({
+  role,
+  text,
+  ephemeral,
+  functionName,
+  functionArgs,
+}: {
+  role: ChatMsg["role"];
+  text: string;
   ephemeral?: boolean;
   functionName?: string;
   functionArgs?: any;
@@ -344,7 +498,11 @@ function Bubble({ role, text, ephemeral, functionName, functionArgs }: {
       exit={{ opacity: 0, y: -8 }}
       className={`w-fit max-w-[85%] ${isUser ? "ml-auto" : "mr-auto"}`}
     >
-      <div className={`${base} ${isUser ? you : isAssistant ? bot : isFunction ? func : sys} ${ephemeral ? "opacity-70 italic" : ""}`}>
+      <div
+        className={`${base} ${
+          isUser ? you : isAssistant ? bot : isFunction ? func : sys
+        } ${ephemeral ? "opacity-70 italic" : ""}`}
+      >
         {isFunction && (
           <div className="flex items-center gap-2 mb-2">
             <Wrench className="size-4" />
@@ -354,7 +512,9 @@ function Bubble({ role, text, ephemeral, functionName, functionArgs }: {
         {text}
         {isFunction && functionArgs && (
           <div className="mt-2 text-xs opacity-70">
-            <pre className="whitespace-pre-wrap">{JSON.stringify(functionArgs, null, 2)}</pre>
+            <pre className="whitespace-pre-wrap">
+              {JSON.stringify(functionArgs, null, 2)}
+            </pre>
           </div>
         )}
       </div>
@@ -372,10 +532,24 @@ function MicDock() {
   const [connecting, setConnecting] = useState(false);
   const [connectedOnce, setConnectedOnce] = useState(false);
   // Modes: push-to-talk vs hands-free (VAD)
-  const [mode, setMode] = useState<'push' | 'handsfree'>(() => (typeof window !== 'undefined' && (localStorage.getItem('voice-mode') as any)) || 'push');
-  const [autoDuck, setAutoDuck] = useState<boolean>(() => (typeof window !== 'undefined' ? localStorage.getItem('voice-autoduck') === '1' : false));
+  const [mode, setMode] = useState<"push" | "handsfree">(
+    () =>
+      (typeof window !== "undefined" &&
+        (localStorage.getItem("voice-mode") as any)) ||
+      "push"
+  );
+  const [autoDuck, setAutoDuck] = useState<boolean>(() =>
+    typeof window !== "undefined"
+      ? localStorage.getItem("voice-autoduck") === "1"
+      : false
+  );
 
-  const isConnectedState = state === TransportStateEnum.READY || state === TransportStateEnum.CONNECTED;
+  // Use the custom hook for managing thread and user IDs
+  const { threadId, userId } = useThreadAndUserId();
+
+  const isConnectedState =
+    state === TransportStateEnum.READY ||
+    state === TransportStateEnum.CONNECTED;
 
   const startOrConnect = useCallback(async () => {
     if (!pcClient) return;
@@ -383,6 +557,11 @@ function MicDock() {
     try {
       const startEndpoint = process.env.NEXT_PUBLIC_PIPECAT_START_ENDPOINT;
       const offerUrl = process.env.NEXT_PUBLIC_PIPECAT_OFFER_URL;
+
+      console.log(
+        `Connecting to backend (thread ID will be generated by backend)`
+      );
+
       if (startEndpoint) {
         await pcClient.startBotAndConnect({ endpoint: startEndpoint });
       } else if (offerUrl) {
@@ -401,31 +580,39 @@ function MicDock() {
 
   // Clear connecting when transport settles to any terminal-ish state
   useEffect(() => {
-    if (state === TransportStateEnum.READY || state === TransportStateEnum.CONNECTED || state === TransportStateEnum.DISCONNECTED) {
+    if (
+      state === TransportStateEnum.READY ||
+      state === TransportStateEnum.CONNECTED ||
+      state === TransportStateEnum.DISCONNECTED
+    ) {
       setConnecting(false);
     }
   }, [state]);
 
   // Persist mode settings
   useEffect(() => {
-    if (typeof window === 'undefined') return;
-    try { localStorage.setItem('voice-mode', mode); } catch {}
+    if (typeof window === "undefined") return;
+    try {
+      localStorage.setItem("voice-mode", mode);
+    } catch {}
   }, [mode]);
   useEffect(() => {
-    if (typeof window === 'undefined') return;
-    try { localStorage.setItem('voice-autoduck', autoDuck ? '1' : '0'); } catch {}
+    if (typeof window === "undefined") return;
+    try {
+      localStorage.setItem("voice-autoduck", autoDuck ? "1" : "0");
+    } catch {}
   }, [autoDuck]);
 
   // Hands-free: keep mic open when connected
   useEffect(() => {
-    if (mode === 'handsfree' && isConnectedState) {
+    if (mode === "handsfree" && isConnectedState) {
       enableMic(true);
     }
   }, [mode, isConnectedState, enableMic]);
 
   // Optional: Auto-duck mic when bot speaks (off by default)
   useEffect(() => {
-    if (mode !== 'handsfree' || !isConnectedState) return;
+    if (mode !== "handsfree" || !isConnectedState) return;
     if (!autoDuck) return;
     enableMic(!botTalking);
   }, [botTalking, autoDuck, mode, isConnectedState, enableMic]);
@@ -445,7 +632,7 @@ function MicDock() {
       setBotTalking(false);
     }, [])
   );
-        
+
   // Also clear spinner on explicit errors
   useRTVIClientEvent(
     RTVIEvent.Error,
@@ -463,13 +650,13 @@ function MicDock() {
       await startOrConnect();
       return;
     }
-    if (mode === 'handsfree') return; // no press-to-talk in handsfree
+    if (mode === "handsfree") return; // no press-to-talk in handsfree
     pressedRef.current = true;
     enableMic(true);
   }, [pcClient, isConnectedState, startOrConnect, enableMic, mode]);
 
   const onRelease = useCallback(() => {
-    if (mode === 'handsfree') return; // no release effect in handsfree
+    if (mode === "handsfree") return; // no release effect in handsfree
     pressedRef.current = false;
     setTimeout(() => {
       if (!pressedRef.current) enableMic(false);
@@ -477,13 +664,26 @@ function MicDock() {
   }, [enableMic, mode]);
 
   const isConnected = isConnectedState;
-  const label = mode === 'handsfree'
-    ? (isConnected ? (isMicEnabled ? 'Hands‑free listening' : 'Muted') : connecting ? 'Connecting…' : connectedOnce ? 'Reconnect' : 'Start')
-    : (!isConnected
-        ? (connecting ? 'Connecting…' : connectedOnce ? 'Reconnect' : 'Start')
-        : isMicEnabled
-        ? 'Listening'
-        : 'Hold to talk');
+  const label =
+    mode === "handsfree"
+      ? isConnected
+        ? isMicEnabled
+          ? "Hands‑free listening"
+          : "Muted"
+        : connecting
+        ? "Connecting…"
+        : connectedOnce
+        ? "Reconnect"
+        : "Start"
+      : !isConnected
+      ? connecting
+        ? "Connecting…"
+        : connectedOnce
+        ? "Reconnect"
+        : "Start"
+      : isMicEnabled
+      ? "Listening"
+      : "Hold to talk";
 
   return (
     <div className="sticky bottom-0 left-0 right-0 mx-auto max-w-3xl">
@@ -494,20 +694,32 @@ function MicDock() {
         <div className="pointer-events-auto inline-flex items-center gap-3">
           <div className="rounded-full bg-neutral-800/70 ring-1 ring-white/10 p-1">
             <button
-              className={`px-3 py-1 text-sm rounded-full ${mode === 'push' ? 'bg-neutral-700 text-white' : 'text-neutral-300 hover:bg-neutral-700/40'}`}
-              onClick={() => setMode('push')}
+              className={`px-3 py-1 text-sm rounded-full ${
+                mode === "push"
+                  ? "bg-neutral-700 text-white"
+                  : "text-neutral-300 hover:bg-neutral-700/40"
+              }`}
+              onClick={() => setMode("push")}
             >
               Push
             </button>
             <button
-              className={`px-3 py-1 text-sm rounded-full ${mode === 'handsfree' ? 'bg-neutral-700 text-white' : 'text-neutral-300 hover:bg-neutral-700/40'}`}
-              onClick={() => setMode('handsfree')}
+              className={`px-3 py-1 text-sm rounded-full ${
+                mode === "handsfree"
+                  ? "bg-neutral-700 text-white"
+                  : "text-neutral-300 hover:bg-neutral-700/40"
+              }`}
+              onClick={() => setMode("handsfree")}
             >
               Hands‑free
             </button>
           </div>
           <label className="text-sm text-neutral-300 inline-flex items-center gap-2 select-none">
-            <input type="checkbox" checked={autoDuck} onChange={(e) => setAutoDuck(e.target.checked)} />
+            <input
+              type="checkbox"
+              checked={autoDuck}
+              onChange={(e) => setAutoDuck(e.target.checked)}
+            />
             Auto‑mute on bot
           </label>
         </div>
@@ -567,7 +779,7 @@ function MicDock() {
                     await startOrConnect();
                     return;
                   }
-                  if (mode === 'handsfree') {
+                  if (mode === "handsfree") {
                     // Hands-free: tap toggles mute
                     enableMic(!isMicEnabled);
                   } else {
