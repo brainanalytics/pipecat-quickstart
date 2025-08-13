@@ -271,6 +271,7 @@ function MessagePane({ onNewConversation }: { onNewConversation: () => void }) {
   const pcClient = usePipecatClient();
   const [msgs, setMsgs] = useState<ChatMsg[]>([]);
   const [botStream, setBotStream] = useState("");
+  const [isWaitingForResponse, setIsWaitingForResponse] = useState(false);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const [dockPadding, setDockPadding] = useState<number>(280);
   const transportState = usePipecatClientTransportState();
@@ -279,6 +280,7 @@ function MessagePane({ onNewConversation }: { onNewConversation: () => void }) {
   const clearMessages = useCallback(() => {
     setMsgs([]);
     setBotStream("");
+    setIsWaitingForResponse(false);
   }, []);
 
   // Listen for new conversation requests
@@ -299,7 +301,7 @@ function MessagePane({ onNewConversation }: { onNewConversation: () => void }) {
   // Scroll to bottom as messages arrive
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [msgs, botStream]);
+  }, [msgs, botStream, isWaitingForResponse]);
 
   // Measure the mic dock height and pad the scroll area so content
   // never scrolls underneath the fixed dock.
@@ -337,6 +339,8 @@ function MessagePane({ onNewConversation }: { onNewConversation: () => void }) {
           (m) => !(m.role === "user" && m.ephemeral)
         );
         if (data.final) {
+          // Start waiting for response when user finishes speaking
+          setIsWaitingForResponse(true);
           return [
             ...withoutEphemeral,
             { id: crypto.randomUUID(), role: "user", text: data.text },
@@ -361,6 +365,8 @@ function MessagePane({ onNewConversation }: { onNewConversation: () => void }) {
     RTVIEvent.LLMFunctionCall,
     useCallback((data: { function_name: string; args?: any }) => {
       console.log("LLMFunctionCall Event1", data);
+      // Clear waiting state when we get a function call
+      setIsWaitingForResponse(false);
       setMsgs((prev) => [
         ...prev,
         {
@@ -389,6 +395,8 @@ function MessagePane({ onNewConversation }: { onNewConversation: () => void }) {
         const functionArgs = data.args || data.arguments;
 
         if (functionName) {
+          // Clear waiting state when we get a function call
+          setIsWaitingForResponse(false);
           setMsgs((prev) => [
             ...prev,
             {
@@ -412,6 +420,8 @@ function MessagePane({ onNewConversation }: { onNewConversation: () => void }) {
       console.log("LLMFunctionCall Event3", data);
       const functionName =
         data?.function_name || data?.name || data?.function || "unknown";
+      // Clear waiting state when we get a function call
+      setIsWaitingForResponse(false);
       setMsgs((prev) => [
         ...prev,
         {
@@ -430,6 +440,8 @@ function MessagePane({ onNewConversation }: { onNewConversation: () => void }) {
     RTVIEvent.BotLlmText,
     useCallback((data: { text: string }) => {
       console.log("BotLlmText Event", data);
+      // Clear waiting state when we start getting bot response
+      setIsWaitingForResponse(false);
       setBotStream((s) => s + data.text);
     }, [])
   );
@@ -439,6 +451,8 @@ function MessagePane({ onNewConversation }: { onNewConversation: () => void }) {
     RTVIEvent.BotTranscript,
     useCallback((data: { text: string }) => {
       console.log("BotTranscript Event", data);
+      // Clear waiting state when we get final response
+      setIsWaitingForResponse(false);
       setMsgs((prev) => [
         ...prev.filter((m) => !(m.role === "assistant" && m.ephemeral)),
         { id: crypto.randomUUID(), role: "assistant", text: data.text },
@@ -452,6 +466,8 @@ function MessagePane({ onNewConversation }: { onNewConversation: () => void }) {
     RTVIEvent.Error,
     useCallback((msg: any) => {
       console.log("Error Event", msg);
+      // Clear waiting state on error
+      setIsWaitingForResponse(false);
       setMsgs((prev) => [
         ...prev,
         {
@@ -480,6 +496,14 @@ function MessagePane({ onNewConversation }: { onNewConversation: () => void }) {
           />
         ))}
         {botStream && <Bubble role="assistant" text={botStream} ephemeral />}
+        {isWaitingForResponse && (
+          <Bubble 
+            role="assistant" 
+            text="..." 
+            ephemeral 
+            isTyping={true}
+          />
+        )}
         <div ref={bottomRef} />
       </div>
     </div>
@@ -492,12 +516,14 @@ function Bubble({
   ephemeral,
   functionName,
   functionArgs,
+  isTyping,
 }: {
   role: ChatMsg["role"];
   text: string;
   ephemeral?: boolean;
   functionName?: string;
   functionArgs?: any;
+  isTyping?: boolean;
 }) {
   const isUser = role === "user";
   const isAssistant = role === "assistant";
@@ -526,7 +552,30 @@ function Bubble({
             <span className="font-medium">Function Call</span>
           </div>
         )}
-        {text}
+        {isTyping ? (
+          <div className="flex items-center gap-1">
+            {/* <span className="text-neutral-400">Thinking</span> */}
+            <div className="flex gap-1">
+              <motion.div
+                className="w-1 h-1 bg-neutral-400 rounded-full"
+                animate={{ opacity: [0.3, 1, 0.3] }}
+                transition={{ duration: 1.5, repeat: Infinity, delay: 0 }}
+              />
+              <motion.div
+                className="w-1 h-1 bg-neutral-400 rounded-full"
+                animate={{ opacity: [0.3, 1, 0.3] }}
+                transition={{ duration: 1.5, repeat: Infinity, delay: 0.2 }}
+              />
+              <motion.div
+                className="w-1 h-1 bg-neutral-400 rounded-full"
+                animate={{ opacity: [0.3, 1, 0.3] }}
+                transition={{ duration: 1.5, repeat: Infinity, delay: 0.4 }}
+              />
+            </div>
+          </div>
+        ) : (
+          text
+        )}
         {isFunction && functionArgs && (
           <div className="mt-2 text-xs opacity-70">
             <pre className="whitespace-pre-wrap">
