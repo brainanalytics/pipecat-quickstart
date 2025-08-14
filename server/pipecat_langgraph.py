@@ -49,6 +49,8 @@ class LanggraphProcessor(LLMService):
         try:
 
             import aiohttp
+            import asyncio
+            from aiohttp import ClientPayloadError, ClientConnectionError
             from pipecat.frames.frames import (
                 FunctionCallFromLLM,
                 FunctionCallInProgressFrame,
@@ -71,114 +73,160 @@ class LanggraphProcessor(LLMService):
             logger.debug(f"Full request body: {request_body}")
 
             async with aiohttp.ClientSession() as session:
+                timeout = aiohttp.ClientTimeout(total=None)
                 async with session.post(
-                    os.getenv("LANGGRAPH_ENDPOINT_URL"), json=request_body
+                    os.getenv("LANGGRAPH_ENDPOINT_URL"),
+                    json=request_body,
+                    timeout=timeout,
                 ) as response:
                     active_tool_calls = {}
                     tool_input_buffer = {}
 
-                    async for line in response.content:
-                        if line:
-                            try:
-                                line_text = line.decode("utf-8").strip()
-                                if line_text.startswith("data: "):
-                                    line_text = line_text[6:]
+                    if response.status != 200:
+                        body = await response.text()
+                        logger.error(
+                            f"LangGraph stream HTTP {response.status}: {body}"
+                        )
+                        return
 
-                                if line_text == "[DONE]":
-                                    break
+                    try:
+                        async for line in response.content:
+                            if line:
+                                try:
+                                    line_text = line.decode("utf-8").strip()
+                                    if line_text.startswith("data: "):
+                                        line_text = line_text[6:]
 
-                                if line_text:
-                                    response_data = json.loads(line_text)
-                                    response_type = response_data.get("type")
-                                    print(response_data)
-                                    if response_type == "reasoning-start":
-                                        # Reasoning started - could emit a frame here if needed
-                                        logger.debug("Reasoning started")
+                                    if line_text == "[DONE]":
+                                        break
 
-                                    elif response_type == "reasoning-end":
-                                        # Reasoning ended
-                                        logger.debug("Reasoning ended")
-
-                                    elif response_type == "tool-input-start":
-                                        tool_call_id = response_data.get("toolCallId")
-                                        tool_name = response_data.get("toolName")
-                                        if tool_call_id and tool_name:
-                                            tool_input_buffer[tool_call_id] = ""
-                                            function_call = FunctionCallFromLLM(
-                                                function_name=tool_name,
-                                                tool_call_id=tool_call_id,
-                                                arguments={},
-                                                context=None,
-                                            )
-                                            active_tool_calls[tool_call_id] = (
-                                                function_call
-                                            )
-                                            await self.push_frame(
-                                                FunctionCallsStartedFrame(
-                                                    [function_call]
+                                    if line_text:
+                                        response_data = json.loads(line_text)
+                                        response_type = response_data.get("type")
+                                        print(response_data)
+                                        if response_type == "reasoning-start":
+                                            # Reasoning started - could emit a frame here if needed
+                                            logger.debug("Reasoning started")
+                                            try:
+                                                from websocket_server import (
+                                                    enqueue_reasoning,
                                                 )
-                                            )
-                                            await self.push_frame(
-                                                FunctionCallInProgressFrame(
+
+                                                enqueue_reasoning(response_data)
+                                            except Exception:
+                                                pass
+
+                                        elif response_type == "reasoning-end":
+                                            # Reasoning ended
+                                            logger.debug("Reasoning ended")
+                                            try:
+                                                from websocket_server import (
+                                                    enqueue_reasoning,
+                                                )
+
+                                                enqueue_reasoning(response_data)
+                                            except Exception:
+                                                pass
+
+                                        elif response_type == "tool-input-start":
+                                            tool_call_id = response_data.get("toolCallId")
+                                            tool_name = response_data.get("toolName")
+                                            if tool_call_id and tool_name:
+                                                tool_input_buffer[tool_call_id] = ""
+                                                function_call = FunctionCallFromLLM(
                                                     function_name=tool_name,
                                                     tool_call_id=tool_call_id,
                                                     arguments={},
+                                                    context=None,
                                                 )
-                                            )
-
-                                    elif response_type == "tool-input-delta":
-                                        tool_text = response_data.get("text", "")
-                                        tool_id = response_data.get("id")
-                                        # Find the tool call by id or use the most recent one
-                                        for (
-                                            tool_call_id,
-                                            buffer,
-                                        ) in tool_input_buffer.items():
-                                            tool_input_buffer[tool_call_id] += tool_text
-                                            break
-
-                                    elif response_type == "tool-input-end":
-                                        # Tool input complete, update arguments
-                                        for (
-                                            tool_call_id,
-                                            input_text,
-                                        ) in tool_input_buffer.items():
-                                            if tool_call_id in active_tool_calls:
-                                                active_tool_calls[
-                                                    tool_call_id
-                                                ].arguments = {"query": input_text}
-                                                # Emit function call result frame
+                                                active_tool_calls[tool_call_id] = (
+                                                    function_call
+                                                )
                                                 await self.push_frame(
-                                                    FunctionCallResultFrame(
-                                                        function_name=active_tool_calls[
-                                                            tool_call_id
-                                                        ].function_name,
-                                                        tool_call_id=tool_call_id,
-                                                        result=f"Tool call executed: {input_text}",
+                                                    FunctionCallsStartedFrame(
+                                                        [function_call]
                                                     )
                                                 )
-                                        tool_input_buffer.clear()
+                                                await self.push_frame(
+                                                    FunctionCallInProgressFrame(
+                                                        function_name=tool_name,
+                                                        tool_call_id=tool_call_id,
+                                                        arguments={},
+                                                    )
+                                                )
 
-                                    elif response_type == "text-start":
-                                        # Text response starting
-                                        logger.debug("Text response started")
+                                        elif response_type == "tool-input-delta":
+                                            tool_text = response_data.get("text", "")
+                                            tool_id = response_data.get("id")
+                                            # Find the tool call by id or use the most recent one
+                                            for (
+                                                tool_call_id,
+                                                buffer,
+                                            ) in tool_input_buffer.items():
+                                                tool_input_buffer[tool_call_id] += tool_text
+                                                break
 
-                                    elif response_type == "text-delta":
-                                        response_text = response_data.get("text", "")
-                                        if response_text:
-                                            await self.push_frame(
-                                                LLMTextFrame(response_text)
+                                        elif response_type == "tool-input-end":
+                                            # Tool input complete, update arguments
+                                            for (
+                                                tool_call_id,
+                                                input_text,
+                                            ) in tool_input_buffer.items():
+                                                if tool_call_id in active_tool_calls:
+                                                    active_tool_calls[
+                                                        tool_call_id
+                                                    ].arguments = {"query": input_text}
+                                                    # Emit function call result frame
+                                                    await self.push_frame(
+                                                        FunctionCallResultFrame(
+                                                            function_name=active_tool_calls[
+                                                                tool_call_id
+                                                            ].function_name,
+                                                            tool_call_id=tool_call_id,
+                                                            result=f"Tool call executed: {input_text}",
+                                                        )
+                                                    )
+                                            tool_input_buffer.clear()
+
+                                        elif response_type == "text-start":
+                                            # Text response starting
+                                            logger.debug("Text response started")
+
+                                        elif response_type == "reasoning-step":
+                                            try:
+                                                from websocket_server import (
+                                                    enqueue_reasoning,
+                                                )
+
+                                                enqueue_reasoning(response_data)
+                                            except Exception:
+                                                pass
+
+                                        elif response_type == "text-delta":
+                                            response_text = response_data.get("text", "")
+                                            if response_text:
+                                                await self.push_frame(
+                                                    LLMTextFrame(response_text)
+                                                )
+
+                                        elif response_type == "source-url":
+                                            # Source URL information - could be handled if needed
+                                            logger.debug(
+                                                f"Source URL: {response_data.get('url')}"
                                             )
 
-                                    elif response_type == "source-url":
-                                        # Source URL information - could be handled if needed
-                                        logger.debug(
-                                            f"Source URL: {response_data.get('url')}"
-                                        )
-
-                            except json.JSONDecodeError as e:
-                                # Handle non-JSON lines or partial data
-                                continue
+                                except json.JSONDecodeError as e:
+                                    # Handle non-JSON lines or partial data
+                                    continue
+                    except ClientPayloadError as e:
+                        logger.exception(f"LangGraph stream payload error: {e}")
+                        logger.warning(
+                            f"LangGraph stream ended early (ClientPayloadError): {e}"
+                        )
+                    except ClientConnectionError as e:
+                        logger.warning(
+                            f"LangGraph stream connection error: {e}"
+                        )
 
         except GeneratorExit:
             logger.exception(f"{self} generator was closed prematurely")

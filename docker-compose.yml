@@ -7,9 +7,12 @@ services:
     container_name: pipecat-server
     ports:
       - "7860:7860"
+      - "7870:7870"
     environment:
       - HOST=0.0.0.0
       - PORT=7860
+      - WS_HOST=0.0.0.0
+      - WS_PORT=7870
     env_file:
       - ./server/.env
     volumes:
