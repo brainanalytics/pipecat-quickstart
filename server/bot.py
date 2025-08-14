@@ -38,6 +38,15 @@ from pipecat.transports.network.small_webrtc import SmallWebRTCTransport
 
 logger.info("✅ All components loaded successfully!")
 
+# Start the lightweight FastAPI WebSocket server alongside the runner
+try:
+    from websocket_server import start_websocket_server_in_background
+
+    start_websocket_server_in_background()
+    logger.info("Companion WebSocket server started in background thread")
+except Exception as e:
+    logger.exception(f"Failed to start companion WebSocket server: {e}")
+
 
 async def run_bot(transport: BaseTransport):
     logger.info(f"Starting bot")
@@ -160,6 +169,14 @@ async def run_bot(transport: BaseTransport):
 
 async def bot(runner_args: RunnerArguments):
     """Main bot entry point for the bot starter."""
+
+    # Ensure the companion WS server is running (idempotent)
+    try:
+        from websocket_server import start_websocket_server_in_background
+
+        start_websocket_server_in_background()
+    except Exception:
+        pass
 
     transport = SmallWebRTCTransport(
         params=TransportParams(

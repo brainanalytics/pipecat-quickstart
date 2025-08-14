@@ -163,7 +163,7 @@ function AppShell() {
   return (
     <div className="min-h-screen w-full bg-gradient-to-b from-neutral-950 via-neutral-950 to-neutral-900 text-neutral-50 flex flex-col">
       <TopBar onNewConversation={handleNewConversation} />
-      <div className="flex-1 grid grid-rows-[1fr_auto] max-w-3xl w-full mx-auto px-4 gap-4 pb-28 md:pb-32">
+      <div className="flex-1 grid grid-rows-[1fr_auto] max-w-3xl w-full mx-auto px-4 gap-4 pb-28 md:pb-32 min-h-0">
         <MessagePane onNewConversation={handleNewConversation} />
         <MicDock />
       </div>
@@ -175,6 +175,39 @@ function AppShell() {
 function TopBar({ onNewConversation }: { onNewConversation: () => void }) {
   // Use the custom hook for managing thread and user IDs
   const state = usePipecatClientTransportState();
+  const [pingCount, setPingCount] = useState<number>(0);
+  const wsRef = useRef<WebSocket | null>(null);
+
+  // Lightweight WS client to companion FastAPI server
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const host = process.env.NEXT_PUBLIC_WS_HOST || window.location.hostname;
+      const port = process.env.NEXT_PUBLIC_WS_PORT || "7870";
+      const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+      const url = `${protocol}://${host}:${port}/ws/ping`;
+      const ws = new WebSocket(url);
+      wsRef.current = ws;
+      ws.onmessage = (evt) => {
+        try {
+          const data = JSON.parse(evt.data);
+          if (data?.type === "ping" && typeof data?.count === "number") {
+            setPingCount(data.count);
+          }
+        } catch {}
+      };
+      ws.onerror = () => {};
+      ws.onclose = () => {};
+    } catch {
+      // ignore
+    }
+    return () => {
+      try {
+        wsRef.current?.close();
+      } catch {}
+      wsRef.current = null;
+    };
+  }, []);
   const isConnectedState =
     state === TransportStateEnum.READY ||
     state === TransportStateEnum.CONNECTED;
@@ -211,6 +244,9 @@ function TopBar({ onNewConversation }: { onNewConversation: () => void }) {
               hidden={!isDisconnectedState}
             />
             <span className="text-sm text-neutral-300">{niceState}</span>
+            <span className="text-xs text-neutral-400 ml-2">
+              Ping: {pingCount}
+            </span>
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -271,15 +307,71 @@ function MessagePane({ onNewConversation }: { onNewConversation: () => void }) {
   const pcClient = usePipecatClient();
   const [msgs, setMsgs] = useState<ChatMsg[]>([]);
   const [botStream, setBotStream] = useState("");
+  const [isWaitingForResponse, setIsWaitingForResponse] = useState(false);
+  const [reasoningActive, setReasoningActive] = useState(false);
+  const [reasoningText, setReasoningText] = useState("");
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const [dockPadding, setDockPadding] = useState<number>(280);
   const transportState = usePipecatClientTransportState();
+  const [botTalking, setBotTalking] = useState(false);
+  const beepAudioRef = useRef<HTMLAudioElement | null>(null);
 
   // Clear messages when starting a new conversation
   const clearMessages = useCallback(() => {
     setMsgs([]);
     setBotStream("");
+    setIsWaitingForResponse(false);
   }, []);
+
+  // Track bot speaking state to determine if any other audio is playing
+  useRTVIClientEvent(
+    RTVIEvent.BotStartedSpeaking,
+    useCallback(() => {
+      setBotTalking(true);
+    }, [])
+  );
+  useRTVIClientEvent(
+    RTVIEvent.BotStoppedSpeaking,
+    useCallback(() => {
+      setBotTalking(false);
+    }, [])
+  );
+
+  // Prepare the reasoning beep audio element
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const audio = new Audio("/beep2.mp3");
+    audio.loop = true;
+    audio.preload = "auto";
+    // Slightly lower volume to keep it subtle; adjust if needed
+    audio.volume = 0.25;
+    beepAudioRef.current = audio;
+    return () => {
+      try {
+        audio.pause();
+      } catch {}
+      beepAudioRef.current = null;
+    };
+  }, []);
+
+  // Play beep when reasoning is active and no other audio (bot) is playing; stop otherwise
+  useEffect(() => {
+    const audio = beepAudioRef.current;
+    if (!audio) return;
+    if (reasoningActive && !botTalking) {
+      if (audio.paused) {
+        try {
+          audio.currentTime = 0;
+          audio.play().catch(() => {});
+        } catch {}
+      }
+    } else {
+      try {
+        if (!audio.paused) audio.pause();
+      } catch {}
+    }
+  }, [reasoningActive, botTalking]);
 
   // Listen for new conversation requests
   useEffect(() => {
@@ -296,10 +388,19 @@ function MessagePane({ onNewConversation }: { onNewConversation: () => void }) {
     }
   }, [transportState, clearMessages]);
 
-  // Scroll to bottom as messages arrive
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [msgs, botStream]);
+    if (!isWaitingForResponse) {
+      setReasoningActive(false);
+      setReasoningText("");
+    }
+  }, [isWaitingForResponse]);
+
+  // Keep the scroll container pinned to bottom as messages/tokens arrive
+  useEffect(() => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, [msgs, botStream, isWaitingForResponse, reasoningActive, reasoningText]);
 
   // Measure the mic dock height and pad the scroll area so content
   // never scrolls underneath the fixed dock.
@@ -337,6 +438,8 @@ function MessagePane({ onNewConversation }: { onNewConversation: () => void }) {
           (m) => !(m.role === "user" && m.ephemeral)
         );
         if (data.final) {
+          // Start waiting for response when user finishes speaking
+          setIsWaitingForResponse(true);
           return [
             ...withoutEphemeral,
             { id: crypto.randomUUID(), role: "user", text: data.text },
@@ -361,6 +464,8 @@ function MessagePane({ onNewConversation }: { onNewConversation: () => void }) {
     RTVIEvent.LLMFunctionCall,
     useCallback((data: { function_name: string; args?: any }) => {
       console.log("LLMFunctionCall Event1", data);
+      // Clear waiting state when we get a function call
+      setIsWaitingForResponse(false);
       setMsgs((prev) => [
         ...prev,
         {
@@ -389,6 +494,8 @@ function MessagePane({ onNewConversation }: { onNewConversation: () => void }) {
         const functionArgs = data.args || data.arguments;
 
         if (functionName) {
+          // Clear waiting state when we get a function call
+          setIsWaitingForResponse(false);
           setMsgs((prev) => [
             ...prev,
             {
@@ -412,6 +519,8 @@ function MessagePane({ onNewConversation }: { onNewConversation: () => void }) {
       console.log("LLMFunctionCall Event3", data);
       const functionName =
         data?.function_name || data?.name || data?.function || "unknown";
+      // Clear waiting state when we get a function call
+      setIsWaitingForResponse(false);
       setMsgs((prev) => [
         ...prev,
         {
@@ -430,6 +539,8 @@ function MessagePane({ onNewConversation }: { onNewConversation: () => void }) {
     RTVIEvent.BotLlmText,
     useCallback((data: { text: string }) => {
       console.log("BotLlmText Event", data);
+      // Clear waiting state when we start getting bot response
+      setIsWaitingForResponse(false);
       setBotStream((s) => s + data.text);
     }, [])
   );
@@ -439,6 +550,8 @@ function MessagePane({ onNewConversation }: { onNewConversation: () => void }) {
     RTVIEvent.BotTranscript,
     useCallback((data: { text: string }) => {
       console.log("BotTranscript Event", data);
+      // Clear waiting state when we get final response
+      setIsWaitingForResponse(false);
       setMsgs((prev) => [
         ...prev.filter((m) => !(m.role === "assistant" && m.ephemeral)),
         { id: crypto.randomUUID(), role: "assistant", text: data.text },
@@ -452,6 +565,8 @@ function MessagePane({ onNewConversation }: { onNewConversation: () => void }) {
     RTVIEvent.Error,
     useCallback((msg: any) => {
       console.log("Error Event", msg);
+      // Clear waiting state on error
+      setIsWaitingForResponse(false);
       setMsgs((prev) => [
         ...prev,
         {
@@ -463,10 +578,48 @@ function MessagePane({ onNewConversation }: { onNewConversation: () => void }) {
     }, [])
   );
 
+  // Subscribe to reasoning events from the companion WS server
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const host = process.env.NEXT_PUBLIC_WS_HOST || window.location.hostname;
+      const port = process.env.NEXT_PUBLIC_WS_PORT || "7870";
+      const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+      const url = `${protocol}://${host}:${port}/ws/reasoning`;
+      const ws = new WebSocket(url);
+      ws.onmessage = (evt) => {
+        try {
+          const data = JSON.parse(evt.data);
+          const t = data?.type;
+          if (t === "reasoning-start") {
+            setReasoningActive(true);
+            setReasoningText("");
+            console.log("Reasoning started", data);
+          } else if (t === "reasoning-step") {
+            const token =
+              typeof data?.text === "string"
+                ? data.text
+                : typeof data?.delta === "string"
+                ? data.delta
+                : "";
+            console.log("Reasoning delta", token);
+            if (token) setReasoningText((s) => s + token);
+          }
+        } catch {}
+      };
+      return () => {
+        try {
+          ws.close();
+        } catch {}
+      };
+    } catch {}
+  }, []);
+
   return (
     <div
-      className="w-full overflow-y-auto pt-6"
+      className="w-full h-full overflow-y-auto pt-6"
       style={{ paddingBottom: dockPadding }}
+      ref={scrollContainerRef}
     >
       <div className="mx-auto max-w-3xl space-y-3">
         {msgs.map((m) => (
@@ -480,6 +633,15 @@ function MessagePane({ onNewConversation }: { onNewConversation: () => void }) {
           />
         ))}
         {botStream && <Bubble role="assistant" text={botStream} ephemeral />}
+        {reasoningActive && (
+          <Bubble
+            role="assistant"
+            text="Thinking..."
+            ephemeral
+            isTyping={true}
+            reasoningText={reasoningText}
+          />
+        )}
         <div ref={bottomRef} />
       </div>
     </div>
@@ -492,12 +654,16 @@ function Bubble({
   ephemeral,
   functionName,
   functionArgs,
+  isTyping,
+  reasoningText,
 }: {
   role: ChatMsg["role"];
   text: string;
   ephemeral?: boolean;
   functionName?: string;
   functionArgs?: any;
+  isTyping?: boolean;
+  reasoningText?: string;
 }) {
   const isUser = role === "user";
   const isAssistant = role === "assistant";
@@ -526,7 +692,35 @@ function Bubble({
             <span className="font-medium">Function Call</span>
           </div>
         )}
-        {text}
+        {isTyping ? (
+          <div className="flex items-center gap-1">
+            {/* <span className="text-neutral-400">Thinking</span> */}
+            <div className="flex gap-1">
+              <motion.div
+                className="w-1 h-1 bg-neutral-400 rounded-full"
+                animate={{ opacity: [0.3, 1, 0.3] }}
+                transition={{ duration: 1.5, repeat: Infinity, delay: 0 }}
+              />
+              <motion.div
+                className="w-1 h-1 bg-neutral-400 rounded-full"
+                animate={{ opacity: [0.3, 1, 0.3] }}
+                transition={{ duration: 1.5, repeat: Infinity, delay: 0.2 }}
+              />
+              <motion.div
+                className="w-1 h-1 bg-neutral-400 rounded-full"
+                animate={{ opacity: [0.3, 1, 0.3] }}
+                transition={{ duration: 1.5, repeat: Infinity, delay: 0.4 }}
+              />
+            </div>
+          </div>
+        ) : (
+          text
+        )}
+        {reasoningText ? (
+          <div className="mt-4 text-xs opacity-70">
+            <pre className="whitespace-pre-wrap">{reasoningText}</pre>
+          </div>
+        ) : null}
         {isFunction && functionArgs && (
           <div className="mt-2 text-xs opacity-70">
             <pre className="whitespace-pre-wrap">

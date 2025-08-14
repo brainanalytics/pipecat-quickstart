@@ -46,8 +46,8 @@ ENV PIPECAT_PORT=7860
 ENV HOST=0.0.0.0
 ENV PORT=7860
 
-# Expose port 7860 (default for pipecat)
-EXPOSE 7860
+# Expose ports: 7860 for Pipecat, 7870 for the companion WS server
+EXPOSE 7860 7870
 
 # Command to run the application
 CMD ["python", "bot.py"]
